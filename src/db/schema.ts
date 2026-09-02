@@ -134,6 +134,16 @@ export const rolePermissions = pgTable(
  * Global person identity table:
  * - national_id is globally unique across the entire domain.
  * - users and family_members both reference people to prevent duplicate person representation.
+ *
+ * Phone policy (final):
+ * - `phone` (primary) is OPTIONAL at the data layer: not every family member owns a phone.
+ * - When present — primary or secondary — it must match exactly `^[0-9]{10}$` (DB CHECK).
+ * - Stored as varchar. NEVER store phone numbers as integer (leading zeros / format semantics).
+ * - Family Head primary phone IS REQUIRED, but only at Registration/Service validation:
+ *   "is this person a head?" lives in family_profiles (another row/table), and PostgreSQL
+ *   CHECK constraints cannot span tables. Do NOT re-add NOT NULL here — it would break
+ *   non-head members. Family Head requirements themselves are unchanged.
+ * - `secondary_phone` remains optional, same 10-digit format when present.
  */
 export const people = pgTable(
   "people",
@@ -143,7 +153,7 @@ export const people = pgTable(
     fullName: varchar("full_name", { length: 220 }).notNull(),
     gender: genderEnum("gender").notNull(),
     birthDate: date("birth_date").notNull(),
-    phone: varchar("phone", { length: 10 }).notNull(),
+    phone: varchar("phone", { length: 10 }),
     secondaryPhone: varchar("secondary_phone", { length: 10 }),
     maritalStatus: maritalStatusEnum("marital_status"),
     healthCondition: healthConditionEnum("health_condition").notNull().default("healthy"),
@@ -156,7 +166,7 @@ export const people = pgTable(
     uniqueIndex("people_national_id_uidx").on(table.nationalId),
     index("people_phone_idx").on(table.phone),
     check("people_national_id_format_chk", sql`${table.nationalId} ~ '^[0-9]{6,20}$'`),
-    check("people_phone_format_chk", sql`${table.phone} ~ '^[0-9]{10}$'`),
+    check("people_phone_format_chk", sql`${table.phone} IS NULL OR ${table.phone} ~ '^[0-9]{10}$'`),
     check("people_secondary_phone_format_chk", sql`${table.secondaryPhone} IS NULL OR ${table.secondaryPhone} ~ '^[0-9]{10}$'`),
     check(
       "people_health_other_consistency_chk",
@@ -171,6 +181,34 @@ export const people = pgTable(
   ],
 );
 
+/**
+ * Login account ONLY (decoupled from the Person domain model — see `people`).
+ *
+ * ACCOUNT TYPE / ROLE COMPATIBILITY MATRIX (canonical):
+ *
+ *   account_type  | auth_method  | allowed role_code              | person_id      | username
+ *   --------------+--------------+--------------------------------+----------------+---------------
+ *   family_head   | national_id  | family_head                    | NOT NULL       | NULL
+ *   administrative| username     | branch_admin | publisher |     | optional       | NOT NULL,
+ *                |              | admin | general_manager         | (may link to a | 'admin-' prefix
+ *                |              |                                |  person)       |
+ *
+ * FORBIDDEN combinations: family_head account + any administrative role,
+ * administrative account + family_head role, and `guest` on any users row
+ * (guest = unauthenticated visitor, no account at all).
+ *
+ * What the DB enforces (same-row, enforceable in PostgreSQL):
+ *   - users_account_type_auth_method_chk: family_head → national_id + person_id;
+ *     administrative → username + username auth.
+ *   - users_admin_username_prefix_chk: administrative → username LIKE 'admin-%';
+ *     family_head → username IS NULL.
+ *
+ * What the DB CANNOT enforce — role compatibility is a CROSS-TABLE rule
+ * (users.role_id → roles.code); PostgreSQL CHECK constraints cannot reference
+ * other tables, and a denormalized role_code copy was rejected. It is enforced
+ * in the future Service/Domain transaction (validate the (account_type, role)
+ * pair before INSERT/UPDATE of users) — see docs/architecture-plan.md.
+ */
 export const users = pgTable(
   "users",
   {
@@ -200,7 +238,9 @@ export const users = pgTable(
         CASE
           WHEN ${table.accountType} = 'family_head'
           THEN ${table.authMethod} = 'national_id' AND ${table.personId} IS NOT NULL
-          ELSE ${table.authMethod} = 'username' AND ${table.username} IS NOT NULL
+          WHEN ${table.accountType} = 'administrative'
+          THEN ${table.authMethod} = 'username' AND ${table.username} IS NOT NULL
+          ELSE FALSE
         END
       `,
     ),
@@ -217,6 +257,22 @@ export const users = pgTable(
   ],
 );
 
+/**
+ * Family profile. `head_person_id` IS the Family Head representation.
+ *
+ * OWNERSHIP RULE (canonical, prevents duplicate domain representation):
+ * A person's family affiliation is represented EXACTLY ONCE — either as a head
+ * (`family_profiles.head_person_id`) or as a member (one `family_members` row),
+ * NEVER BOTH. In particular: the Family Head must NOT get an extra
+ * `family_members` row just for being the head.
+ *
+ * DB-enforced parts: one family per head (head unique below), one member row per
+ * person globally (family_members_person_uidx). The head XOR member exclusivity
+ * itself spans two tables, so it CANNOT be a PostgreSQL CHECK — the future
+ * Registration/Family service must assert it inside the same transaction
+ * (lock the people row with SELECT ... FOR UPDATE, then verify no conflicting
+ * representation exists before insert). See docs/architecture-plan.md.
+ */
 export const familyProfiles = pgTable(
   "family_profiles",
   {
@@ -238,6 +294,21 @@ export const familyProfiles = pgTable(
   ],
 );
 
+/**
+ * Family members EXCLUDING the head (the head lives in family_profiles.head_person_id).
+ *
+ * WIVES — max 4, by design:
+ *   - wife_ordinal ∈ 1..4 when relationship = 'wife' (CHECK), NULL otherwise.
+ *   - UNIQUE(family_profile_id, wife_ordinal) partial index for wives:
+ *     a 5th wife needs ordinal 5 (rejected by CHECK) or a taken ordinal
+ *     (rejected by the unique index). Two-layer, race-safe backstop.
+ *
+ * Wife ordinal assignment (future service, race-condition strategy):
+ *   1. BEGIN; SELECT ... FOR UPDATE on the family_profiles row (serialization point).
+ *   2. Read taken ordinals; pick a free slot in 1..4 (freed slots may be reused).
+ *   3. INSERT member; a concurrent double-assign collapses into unique violation
+ *      23505 → retry the transaction.
+ */
 export const familyMembers = pgTable(
   "family_members",
   {
@@ -470,6 +541,18 @@ export const familyMemberRequests = pgTable(
   ],
 );
 
+/**
+ * AUTOMATIC EXPIRATION MODEL (final):
+ * `expire_at` does NOT flip `status` by itself — PostgreSQL never mutates rows on
+ * time passing. Two cooperating pieces instead:
+ *   1. Public visibility is a QUERY predicate (always, from day one):
+ *        status = 'published' AND (expire_at IS NULL OR expire_at > now())
+ *      (+ deleted_at IS NULL at service level).
+ *   2. A future scheduled job transitions status published → expired for
+ *        status = 'published' AND expire_at <= now()
+ *      as a cleanup/archive marker. Job NOT implemented now.
+ * The partial index below serves both the public query and the future job.
+ */
 export const news = pgTable(
   "news",
   {
@@ -490,10 +573,23 @@ export const news = pgTable(
     index("news_status_idx").on(table.status),
     index("news_expire_idx").on(table.expireAt),
     index("news_published_idx").on(table.publishedAt),
+    index("news_public_expiry_idx")
+      .on(table.expireAt)
+      .where(sql`${table.status} = 'published'`),
     check("news_expire_after_publish_chk", sql`${table.expireAt} IS NULL OR ${table.publishedAt} IS NULL OR ${table.expireAt} >= ${table.publishedAt}`),
   ],
 );
 
+/**
+ * Same AUTOMATIC EXPIRATION MODEL as news (see news comment):
+ *   - Public visibility predicate (always):
+ *       status = 'published' AND (expire_at IS NULL OR expire_at > now())
+ *   - Future scheduled job: published → expired when expire_at <= now().
+ *   - `publish_at` (optional) is an additional service-level visibility
+ *     condition (publish_at IS NULL OR publish_at <= now()); scheduling
+ *     semantics are decided at implementation time.
+ * expire_at NEVER changes status implicitly.
+ */
 export const announcements = pgTable(
   "announcements",
   {
@@ -514,6 +610,9 @@ export const announcements = pgTable(
     index("announcements_status_idx").on(table.status),
     index("announcements_publish_idx").on(table.publishAt),
     index("announcements_expire_idx").on(table.expireAt),
+    index("announcements_public_expiry_idx")
+      .on(table.expireAt)
+      .where(sql`${table.status} = 'published'`),
     check(
       "announcements_expire_after_publish_chk",
       sql`${table.expireAt} IS NULL OR ${table.publishAt} IS NULL OR ${table.expireAt} >= ${table.publishAt}`,
@@ -592,6 +691,41 @@ export const auditLogs = pgTable(
   ],
 );
 
+/**
+ * OTP — CURRENT CHALLENGE design (final):
+ *
+ * There is exactly ONE row per (phone, purpose): the CURRENT active challenge,
+ * enforced by a plain `UNIQUE(phone, purpose)` (no partial WHERE clause).
+ *
+ * Why: a partial unique on `consumed_at IS NULL` is broken — an EXPIRED challenge
+ * keeps `consumed_at = NULL` (it was never consumed, it just expired) and would
+ * block issuing a fresh OTP until manual cleanup. The full unique makes that
+ * impossible: the new OTP always reuses the same row.
+ *
+ * Resend = single UPDATE on the existing row:
+ *   - otp_hash      := hash(new code)
+ *   - expires_at    := now() + ttl
+ *   - attempts      := 0
+ *   - last_sent_at  := now()
+ *   - resend_count  := resend_count + 1
+ *   - consumed_at   := NULL   (row reusable after a consumed cycle)
+ *   - locked_until  := cleared when resend policy permits resend
+ *
+ * Issue-when-no-row = INSERT; concurrent INSERT/UPDATE races collapse into a
+ * unique violation (23505) the service retries.
+ *
+ * Guarantees (schema now; enforcement rules documented for the future service):
+ *   - hashed at rest (otp_hash only, never the raw code)
+ *   - single-use     (consume = UPDATE ... WHERE consumed_at IS NULL in the verifying tx)
+ *   - expiring       (expires_at)
+ *   - attempt-limited (attempts <= max_attempts CHECK)
+ *   - rate-limited    (resend_count + window_started_at + last_sent_at)
+ *   - lockable        (locked_until after exhausting attempts)
+ *
+ * History is intentionally NOT kept — do not add an otp_history table unless a
+ * concrete compliance need appears; OTP lifecycle events (sent/verified/locked)
+ * go to audit_logs without the code or its hash. No OTP service is implemented now.
+ */
 export const otpVerifications = pgTable(
   "otp_verifications",
   {
@@ -610,8 +744,7 @@ export const otpVerifications = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("otp_phone_purpose_idx").on(table.phone, table.purpose),
-    uniqueIndex("otp_active_unique_idx").on(table.phone, table.purpose).where(sql`${table.consumedAt} IS NULL`),
+    uniqueIndex("otp_phone_purpose_uidx").on(table.phone, table.purpose),
     check("otp_phone_format_chk", sql`${table.phone} ~ '^[0-9]{10}$'`),
     check("otp_attempt_bounds_chk", sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1 AND ${table.attempts} <= ${table.maxAttempts}`),
     check("otp_resend_count_chk", sql`${table.resendCount} >= 1`),
