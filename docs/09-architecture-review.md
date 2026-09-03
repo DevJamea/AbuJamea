@@ -1,10 +1,10 @@
 # Architecture Review
 
-> هذا الملف يوثّق جولات المراجعة تراكميًا: الجولة الأولى (سياق تاريخي — كل بنودها عولجت)، ثم الجولة النهائية (Final Pre-Implementation Corrections) التي تُغلق مرحلة المعمارية قبل التنفيذ. ما يتعارض بين الجولات تعتمد فيه الجولة الأخيرة.
+> هذا الملف يوثّق جولات المراجعة تراكميًا: الجولة الأولى (سياق تاريخي — كل بنودها عولجت)، الجولة الثانية (تصحيحات الـSchema النهائية)، ثم الجولة الثالثة (Final Pre-Implementation Requirements Verification — قواعد العمل النهائية) التي تُغلق مرحلة ما قبل التنفيذ. ما يتعارض بين الجولات تعتمد فيه الأحدث.
 
 ---
 
-# الجولة الأخيرة — Final Pre-Implementation Corrections
+# الجولة الثانية — Final Pre-Implementation Corrections (تصحيح الـSchema)
 
 ## Issues Found & Fixed
 
@@ -56,12 +56,84 @@
 ## Out of Scope (لم يبدأ — مقصود)
 UI / API / Auth implementation / Registration implementation / OTP implementation / Dashboard / CRUD / Notifications implementation / File upload implementation / Scheduled expiration job.
 
-## Remaining Risks (بعد الجولة الأخيرة)
+## Remaining Risks (بعد الجولة الثانية)
 1. قاعدة "تاريخ الميلاد غير مستقبلي" تعتمد على validation/service وقت التنفيذ (ليست CHECK ثابتة) — مالك معروف، مقبول.
 2. توافق role مع `account_type`: موثق بمصفوفة قانونية + مالك إنفاذ (Service/Domain transaction) — يُنفذ في مرحلة التنفيذ.
-3. حماية race conditions (wife_ordinal، Head XOR Member): استراتيجية موثقة (Transaction + `FOR UPDATE` + backstop 23505) — تُطبق عند التنفيذ الفعلي.
+3. حماية race conditions (wife_ordinal، Head XOR Member، انتقال الأسرة المستقلة): استراتيجية موثقة (Transaction + `FOR UPDATE` + backstop 23505) — تُطبق عند التنفيذ الفعلي.
 4. تنفيذ الصلاحيات الفعلي (Policies/Guards) مؤجل للمرحلة التنفيذية التالية — بقصد.
 5. الـstatus الدلالي للمحتوى المنتهي يصححه Job مستقبلي؛ حتى تشغيله، الإخفاء مضمون عبر مسار الاستعلام العام (لا يظهر محتوى منتهٍ للعامة).
+
+---
+
+# الجولة الثالثة — Final Pre-Implementation Requirements Verification (قواعد العمل النهائية)
+
+> جولة إغلاق نهائية: إضافة قواعد العمل النهائية (انتقال الأسرة المستقلة، استعادة كلمة المرور، إعادة التعيين الإداري، مقدمة الأرشيف الثابتة، المشاركة المجهولة في الأرشيف، مواصفة استيراد Excel) وتوثيقها — دون بدء التنفيذ.
+
+## Files Changed (هذه الجولة)
+- `src/db/schema.ts` — إضافة `archive_image_submissions` + enum الحالة (إضافة فقط، لا تعديل على أي جدول قائم).
+- `docs/architecture-plan.md` — قاعدة الانتقال المستقل، تدفق استعادة كلمة المرور، إعادة التعيين الإداري (GM)، الأرشيف (المقدمة الثابتة + المشاركة المجهولة)، مواصفة Excel، مصفوفة الصلاحيات، أحداث الـaudit، نقاط إنفاذ الأمان.
+- `docs/database-schema.md` — أقسام: الانتقال المستقل، الاستعادة/إعادة التعيين (طبقة البيانات)، جدول المشاركات المجهولة، صفوف مصفوفة الإنفاذ الجديدة، خريطة الجداول.
+- `docs/09-architecture-review.md` — هذا القسم.
+
+## Checklist
+
+- [x] Independent Family Member → Independent Family transfer (طلب عبر موافقة فرع، ليس نقلًا فوريًا — architecture-plan + database-schema)
+- [x] Explicit user confirmation before transfer request (نص التحذير العربي المقترح + تأكيد صريح قبل الإرسال)
+- [x] Atomic transfer transaction (6 خطوات في معاملة واحدة + rollback كامل عند أي فشل)
+- [x] Family Head cannot create second family (`family_profiles_head_person_uidx` + تحقق الخدمة)
+- [x] Existing member cannot belong to multiple families (`family_members_person_uidx` + Head XOR Member)
+- [x] Password recovery: National ID → phone confirmation → OTP (5 خطوات موثقة)
+- [x] Last-two-digits phone hint ("رقم الهاتف المرتبط بالحساب ينتهي بـ 67" — آخر رقمين فقط)
+- [x] Lost phone → Technical Support (لا تحويل إلى Branch Admin — موثق صراحة في المصفوفة والتدفق)
+- [x] General Manager can reset another user's password (حصريًا للـGM — RBAC matrix)
+- [x] Password reset is audited (actor/target/timestamp/action/result/metadata — بلا نص صريح أبدًا)
+- [x] Static Abu Jame'a family introduction in Archive (static content — ليست post، ليست في DB، لا جدول جديد)
+- [x] Anonymous archive image + text submission (يُجمع حصريًا: صورة + نص)
+- [x] Publisher review/preview/edit/publish/reject (دورة كاملة موثقة)
+- [x] No sender notifications (لا استلام/قبول/رفض)
+- [x] No sender account/data collection (جدول `archive_image_submissions` بلا أي عمود هوية — ومنع إضافتها مستقبلًا)
+- [x] Anonymous upload security requirements (حجري/حجم/نوع/magic bytes/rate limiting/معالجة آمنة)
+- [x] Excel import specification (الأوراق الثلاث، الأعمدة، المحظورات، التحققات، تقرير أخطاء قبل الالتزام)
+- [x] RBAC consistency (مصفوفة الصلاحيات الكاملة محدّثة بالقواعد الجديدة دون توسيع زائد)
+- [x] Audit requirements (جدول أحداث audit المطلوبة + ممنوعات الـaudit)
+- [x] Security review (جدول نقاط إنفاذ الأمان — مستوى توثيق، دون تنفيذ)
+- [x] No unresolved documentation contradictions (فحص تقاطعي أدناه)
+
+## فحص التناقضات (Cross-document check)
+
+- README ↔ architecture-plan ↔ database-schema ↔ 09-architecture-review ↔ schema.ts: لا تناقض — README لا يذكر استعادة/أرشيف/استيراد بتفاصيل تتعارض مع الجديد.
+- لا يوجد في أي ملف قاعدة قديمة تمنع عضو أسرة متزوج من أن يصبح رب أسرة مستقل (بحث نصي عبر المستودع — لا نتائج بهذا المعنى).
+- لا يوجد أي توجيه قديم لفقدان الهاتف نحو Branch Admin (أُضيف النفي الصريح في المصفوفة والتدفق).
+- مقدمة الأرشيف موصوفة STATIC وغير مدعومة بقاعدة بيانات في architecture-plan (وdatabase-schema لا تُعرّف لها جدولًا).
+- مشاركة الأرشيف العامة: صورة + نص فقط — مؤكدة في architecture-plan وdatabase-schema وschema.ts (لا أعمدة هوية).
+- قيود DB السابقة لم تُضعف: لم يُمس أي CHECK/فهرس قائم؛ الإضافة الوحيدة جدول + enum جديدان.
+
+## Schema Changes (هذه الجولة)
+
+**إضافة فقط — لا تعديل على أي جدول قائم:**
+
+1. `archive_submission_status_enum` (`pending`/`published`/`rejected`).
+2. جدول `archive_image_submissions`: الكيان الدائم للمشاركات المجهولة (صورة + نص) — بلا أي عمود هوية مرسل:
+   - قيود: حجم ≤ 5MB، extension ∈ jpg/jpeg/png، MIME ∈ image/jpeg/image/png، اتساق المراجعة (reviewed_at + reviewed_by عند الحسم)، ربط المنشور (`published_archive_post_id` NOT NULL إذا وفقط إذا status=published).
+   - فهارس: status (طابور المعلّقة) + created_at.
+   - علاقات: reviewed_by → users، published_archive_post_id → archive_posts.
+
+قرار التصميم: الانتقال المستقل لعضو أسرة، واستعادة كلمة المرور، وإعادة التعيين الإداري، ومقدمة الأرشيف الثابتة — **لا تتطلب أي تغيير schema** (البنية القائمة تدعمها؛ التوثيق يحدد المعاملات والملكية).
+
+## Open Decisions Before Implementation (تحتاج موافقة بشرية)
+
+1. **آلية إلزام تغيير كلمة المرور بعد إعادة التعيين الإداري:** عمود `users.must_change_password` أم آلية بديلة (password_reset_at)؟ — لا يمكن تنفيذ قاعدة GM كاملة دون حسم هذا.
+2. **تمييز طلب الأسرة المستقلة:** اعتمدنا إعادة استخدام `registration_requests` مع discriminator داخل payload (`requestType: "independent_family"`) — هل يُفضَّل عمود صريح (`request_type`) عند بدء التنفيذ؟
+3. **قناة تقديم طلب الأسرة المستقلة:** العضو عادةً بلا حساب — نموذج عام بالهوية+تحقق، أم عبر رب الأسرة الحالي، أم بإدخال من Branch Admin؟ (يحدد كيفية عرض التحذير والتحقق من الهوية قبل كشف انتسابه).
+4. **سياسة تكرار الهاتف في الاستيراد:** هل يُمنع تكرار نفس الهاتف الأساسي عبر الأشخاص؟ الافتراضي الحالي: مسموح (لا قيد فريد) — يحتاج تأكيدًا.
+5. **صيغة دمج أجزاء الاسم الأربعة** في `people.full_name` عند الاستيراد (مسافة واحدة بين الأجزاء غير الفارغة؟ ترتيب؟) — يحتاج تثبيتًا.
+6. **توسيع قائمة أنواع صور المشاركات** (webp/gif؟) والحد الأقصى للحجم (مثبَّت حاليًا 5MB متناسقًا مع المرفقات) — يحتاج تأكيدًا.
+7. **كلمة مرور مؤقتة أم رابط إعادة تعيين** في عملية الـGM (كلاهما ممكن ضمن نفس البنية؛ يحسم آلية التسليم للهدف).
+8. **نطاق الدعم الفني لـ Account Recovery:** العملية موجّهة للدعم الفني الرسمي — إجراءات التحقق الخاصة بها خارج نطاق هذه الجولة وتُوثَّق قبل تنفيذها.
+
+## الخاتمة
+
+Implementation has NOT started. The repository is now prepared for the Implementation phase pending final human review.
 
 ---
 

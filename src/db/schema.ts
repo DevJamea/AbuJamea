@@ -651,6 +651,94 @@ export const archiveImages = pgTable(
   (table) => [index("archive_images_post_idx").on(table.archivePostId)],
 );
 
+export const archiveSubmissionStatusEnum = pgEnum("archive_submission_status", [
+  "pending",
+  "published",
+  "rejected",
+]);
+
+/**
+ * PUBLIC (ANONYMOUS) ARCHIVE IMAGE SUBMISSIONS — schema-ready, service NOT implemented.
+ *
+ * Visitors submit an image + caption for possible publication in the archive.
+ * No login, no account, no tracking page, no notifications to the sender.
+ *
+ * PRIVACY BY DESIGN — the ONLY collected data is the image and its text:
+ *   NO name, phone, national ID, email, account, or any other sender identity
+ *   column exists here, and none may ever be added without a new review.
+ * Rate limiting / abuse control happens at the request level (IP throttling at
+ * the edge/service) and must NOT become persistent sender identification.
+ *
+ * Lifecycle: pending -> published | rejected (Publisher/authorized publishing role).
+ *   - Uploaded files go to PRIVATE/quarantine storage — never publicly reachable
+ *     while pending; only the reviewing role can view them there.
+ *   - On publish: an archive_posts row is created and the image becomes an
+ *     archive_images row (moved to archive storage). `published_archive_post_id`
+ *     links back to it for traceability.
+ *   - On reject: nothing is published; the quarantined file is removed by the
+ *     future service according to its retention policy.
+ *   - `caption` is the sender's original text (immutable evidence);
+ *     `final_caption` is the Publisher-edited text used on publication.
+ *
+ * File safety (same whitelist family as registration attachments, images only):
+ *   jpg/jpeg/png, <= 5MB, magic-byte validation at upload time (service),
+ *   randomized storage names, served only through authorized endpoints.
+ */
+export const archiveImageSubmissions = pgTable(
+  "archive_image_submissions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    originalName: varchar("original_name", { length: 255 }).notNull(),
+    extension: varchar("extension", { length: 10 }).notNull(),
+    mimeType: varchar("mime_type", { length: 120 }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    storagePath: text("storage_path").notNull(),
+    caption: text("caption").notNull(),
+    status: archiveSubmissionStatusEnum("status").notNull().default("pending"),
+    finalCaption: text("final_caption"),
+    reviewedByUserId: uuid("reviewed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    publishedArchivePostId: uuid("published_archive_post_id").references(() => archivePosts.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("archive_submissions_status_idx").on(table.status),
+    index("archive_submissions_created_idx").on(table.createdAt),
+    check(
+      "archive_submissions_size_chk",
+      sql`${table.sizeBytes} > 0 AND ${table.sizeBytes} <= 5242880`,
+    ),
+    check("archive_submissions_ext_chk", sql`lower(${table.extension}) IN ('jpg','jpeg','png')`),
+    check(
+      "archive_submissions_mime_chk",
+      sql`lower(${table.mimeType}) IN ('image/jpeg','image/png')`,
+    ),
+    check(
+      "archive_submissions_review_consistency_chk",
+      sql`
+        CASE
+          WHEN ${table.status} IN ('published','rejected')
+          THEN ${table.reviewedAt} IS NOT NULL AND ${table.reviewedByUserId} IS NOT NULL
+          ELSE TRUE
+        END
+      `,
+    ),
+    check(
+      "archive_submissions_published_link_chk",
+      sql`
+        CASE
+          WHEN ${table.status} = 'published'
+          THEN ${table.publishedArchivePostId} IS NOT NULL
+          ELSE ${table.publishedArchivePostId} IS NULL
+        END
+      `,
+    ),
+  ],
+);
+
 export const notifications = pgTable(
   "notifications",
   {
