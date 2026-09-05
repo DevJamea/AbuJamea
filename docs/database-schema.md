@@ -220,7 +220,7 @@ WHERE status = 'published' AND expire_at <= now();
 
 القاعدة **لا تتطلب أي تعديل schema** — البنية الحالية تدعمها بالكامل:
 
-- الطلب يُخزَّن في `registration_requests` الموجودة (نفس دورة `draft → submitted → pending → approved/rejected` ونفس موافقة الفرع)، مع تمييز النوع داخل `payload` (مثل `requestType: "independent_family"`) — راجع "Open Decisions" حول إضافة عمود تمييز صريح.
+- الطلب يُخزَّن في `registration_requests` الموجودة (نفس دورة `draft → submitted → pending → approved/rejected` ونفس موافقة الفرع)، مع تمييز النوع عبر العمود الصريح **`registration_requests.request_type`** (enum `registration_request_type`: `new_family` | `independent_family`، افتراضي `new_family`) + فهرس `registration_requests_type_status_idx` — **وليس** discriminator داخل الـpayload/JSON. قرار مقفل نهائيًا، راجع `docs/09-architecture-review.md` (الجولة الرابعة).
 - الذرّية والتحقق يعالَجان في معاملة الخدمة — وهذا هو المكان الصحيح معماريًا (ليس CHECK عبر الجداول).
 - قيود DB القائمة تضمن الحدود: `family_members_person_uidx` (لا انتساب مزدوج)، `family_profiles_head_person_uidx` (أسرة واحدة لكل Head)، Head XOR Member.
 
@@ -265,8 +265,8 @@ WHERE status = 'published' AND expire_at <= now();
 
 - `otp_verifications.purpose` تشمل أصلًا `password_reset` — تدفق الاستعادة الذاتية يعيد استخدام تصميم "التحدي الحالي" كاملًا (hash/expiry/attempts/resend/lock/consumed) دون أي إضعاف.
 - التحقق من ملكية الهاتف: مطابقة الهاتف المُدخل مع `people.phone` المرتبط بحساب الـNational ID (عبر `users.person_id`) — منطق خدمة.
-- إعادة التعيين الإداري (General Manager فقط) = كتابة `password_hash` جديد + سجل `audit_logs` — الحقول موجودة.
-- **ملاحظة تنفيذية معتمة (Open Decision):** فرض تغيير كلمة المرور عند أول دخول بعد إعادة التعيين الإداري يحتاج آلية حالة (عمود مثل `users.must_change_password` أو ما يعادلها) — تُقرر قبل بدء التنفيذ، لا حاجة لإضافتها الآن.
+- إعادة التعيين الإداري (General Manager فقط) = كتابة `password_hash` جديد + ضبط `users.must_change_password = true` + سجل `audit_logs` — الحقول موجودة.
+- **قرار مقفل (ليس Open Decision):** فرض تغيير كلمة المرور عند أول دخول بعد إعادة التعيين الإداري يُفرض عبر العمود الصريح **`users.must_change_password`** (`boolean NOT NULL DEFAULT false`) — جزء رسمي من التصميم الحالي. يضبطه GM إلى `true` عند إصدار كلمة مرور مؤقتة؛ عند تسجيل الدخول بكلمة المرور المؤقتة يُفرض تغييرها إلزاميًا قبل اعتبار الحساب في حالة طبيعية؛ بعد نجاح التغيير يعود `false`. كلمة المرور المؤقتة تُخزَّن كـ hash فقط في `password_hash` — لا تُخزَّن كنص صريح أبدًا.
 
 ممنوع في الـaudit دائمًا: كلمات المرور بنص صريح (حتى المؤقتة)، رموز OTP.
 
