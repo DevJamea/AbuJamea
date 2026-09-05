@@ -195,15 +195,18 @@ export const people = pgTable(
  *
  * ACCOUNT TYPE / ROLE COMPATIBILITY MATRIX (canonical):
  *
- *   account_type  | auth_method  | allowed role_code              | person_id      | username
- *   --------------+--------------+--------------------------------+----------------+---------------
- *   family_head   | national_id  | family_head                    | NOT NULL       | NULL
- *   administrative| username     | branch_admin | publisher |     | optional       | NOT NULL,
- *                |              | admin | general_manager         | (may link to a | 'admin-' prefix
- *                |              |                                |  person)       |
+ *   account_type   | auth_method  | allowed role_code              | person_id      | username
+ *   ---------------+--------------+--------------------------------+----------------+---------------
+ *   family_head    | national_id  | family_head                    | NOT NULL       | NULL
+ *   family_member  | national_id  | family_member                  | NOT NULL       | NULL
+ *   administrative | username     | branch_admin | publisher |     | optional       | NOT NULL,
+ *                  |              | admin | general_manager         | (may link to a | 'admin-' prefix
+ *                  |              |                                |  person)       |
  *
- * FORBIDDEN combinations: family_head account + any administrative role,
- * administrative account + family_head role, and `guest` on any users row
+ * FORBIDDEN combinations: family_head account + any role other than family_head,
+ * family_member account + any role other than family_member,
+ * administrative account + family_head or family_member role,
+ * and `guest` on any users row
  * (guest = unauthenticated visitor, no account at all).
  *
  * What the DB enforces (same-row, enforceable in PostgreSQL):

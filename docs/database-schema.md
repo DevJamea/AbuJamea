@@ -68,6 +68,13 @@ CONSTRAINT people_secondary_phone_format_chk CHECK (secondary_phone IS NULL OR s
 
 قاعدة Head XOR Member عبر جدولين → لا يمكن فرضها بـ CHECK في PostgreSQL → تُفرض في معاملة الخدمة (راجع "مصفوفة الإنفاذ").
 
+### سجلات الجرحى (`war_wounded_records`)
+
+- `war_wounded_records` مرتبط بـ `family_members` (عبر `family_member_id`) — يُسجَّل فيه أفراد الأسرة فقط (وليس رب الأسرة).
+- Family Head لا يمكنه الحصول على صف في `war_wounded_records` بسبب قاعدة Head XOR Member (الـHead ليس في `family_members`).
+- `family_profiles.has_war_wounded` هو علامة مستوى الأسرة التي تشير إلى وجود جرحى في الأسرة (يمكن أن يكون الـHead أو أحد الأعضاء).
+- إذا كان رب الأسرة هو الشخص الجريح، تُضبط `family_profiles.has_war_wounded = true` كعلامة أسرية، ولا يُنشأ سجل `war_wounded_record` منفصل للـHead (البنية لا تدعم ذلك ولا يوجد قرار معماري يطلب ذلك).
+
 ### قاعدة 4 زوجات
 
 ```sql
@@ -97,12 +104,14 @@ CREATE UNIQUE INDEX family_members_wife_slot_uidx
 | account_type | auth_method | الأدوار المسموحة | person_id | username |
 |---|---|---|---|---|
 | `family_head` | `national_id` | `family_head` فقط | **NOT NULL** | **NULL** |
+| `family_member` | `national_id` | `family_member` فقط | **NOT NULL** | **NULL** |
 | `administrative` | `username` | `branch_admin`، `publisher`، `admin`، `general_manager` | اختياري (قد يرتبط بشخص) | **NOT NULL** ويبدأ بـ `admin-` |
 
 ممنوع معماريًا:
 
-- حساب `family_head` + أي دور إداري.
-- حساب `administrative` + دور `family_head`.
+- حساب `family_head` + أي دور غير `family_head`.
+- حساب `family_member` + أي دور غير `family_member`.
+- حساب `administrative` + أي دور من الأدوار غير الإدارية (`family_head` أو `family_member`).
 - دور `guest` على أي صف في `users` (الضيف زائر غير مصادق، بلا حساب أصلًا).
 
 ### حدود الإنفاذ
@@ -112,7 +121,7 @@ CREATE UNIQUE INDEX family_members_wife_slot_uidx
 ```sql
 CONSTRAINT users_account_type_auth_method_chk CHECK (
   CASE
-    WHEN account_type = 'family_head'    THEN auth_method = 'national_id' AND person_id IS NOT NULL
+    WHEN account_type IN ('family_head', 'family_member') THEN auth_method = 'national_id' AND person_id IS NOT NULL
     WHEN account_type = 'administrative' THEN auth_method = 'username'    AND username IS NOT NULL
     ELSE FALSE  -- fail-safe: أي قيمة enum مستقبلية ترفض حتى تُقرر صراحة
   END
@@ -318,6 +327,7 @@ pending → rejected    (لا يُنشر شيء؛ الملف الحجري يُن
 | حد 4 زوجات + ordinal ∈ 1..4 | ✅ CHECK + unique جزئي | — |
 | تعيين wife_ordinal ضد السباقات | backstop (23505) | ✅ معاملة + `FOR UPDATE` |
 | family_head → national_id + person_id + username NULL | ✅ CHECK | — |
+| family_member → national_id + person_id + username NULL | ✅ CHECK | — |
 | administrative → username + بادئة `admin-` | ✅ CHECK | — |
 | توافق account_type ↔ role | ❌ عبر الجداول | ✅ معاملة الخدمة |
 | تاريخ ميلاد غير مستقبلي | ❌ زمني متغير | ✅ validation وقت الكتابة |
@@ -366,10 +376,11 @@ CREATE INDEX IF NOT EXISTS announcements_public_expiry_idx
 
 -- 4) users_account_type_auth_method_chk: استبدال ELSE ضمني بـ WHEN صريح + ELSE FALSE
 --    (نفس المنطق للصفوف القائمة؛ تفاحم fail-safe للقيم المستقبلية)
+--    يشمل الآن family_member مع family_head في نفس الشرط.
 ALTER TABLE users DROP CONSTRAINT users_account_type_auth_method_chk;
 ALTER TABLE users ADD CONSTRAINT users_account_type_auth_method_chk CHECK (
   CASE
-    WHEN account_type = 'family_head'    THEN auth_method = 'national_id' AND person_id IS NOT NULL
+    WHEN account_type IN ('family_head', 'family_member') THEN auth_method = 'national_id' AND person_id IS NOT NULL
     WHEN account_type = 'administrative' THEN auth_method = 'username'    AND username IS NOT NULL
     ELSE FALSE
   END
@@ -377,6 +388,28 @@ ALTER TABLE users ADD CONSTRAINT users_account_type_auth_method_chk CHECK (
 ```
 
 **تحذير ترحيل OTP:** الخطوة 2 تحذف سجلات تحدٍ قديمة مكررة (المستهلكة تاريخيًا) — لا قيمة دائمة لها (لا يوجد متطلب تاريخ OTP)، لكن إن وُجدت قاعدة انتهازية للتدقيق، صدّرها إلى `audit_logs` أو نسخة احتياطية قبل الحذف. أي عملية ترحيل تُنفذ داخل نافذة صيانة مع backup مجرّب.
+
+---
+
+## الفروع الرسمية الـ13 (Seed Official)
+
+يجب أن يحتوي الـseed الرسمي لجدول `branches` على الفروع الـ13 التالية بالضبط:
+
+1. آل زنيد
+2. آل نصير
+3. أبو قويدر وأبو سلمي
+4. الحاج موسى
+5. آل سويلم
+6. آل أبو صفر
+7. الحاج حسين
+8. آل يونس
+9. آل أبو عودة
+10. آل أبو طيبة
+11. آل أبو ثابت
+12. آل سمحان
+13. الحاج سلمان
+
+**مهم:** "آل سمحان" و"الحاج سلمان" فرعان منفصلان ولا يُدمجان. لم يُنفذ الـseed بعد — هذا توثيق معماري فقط.
 
 ---
 
