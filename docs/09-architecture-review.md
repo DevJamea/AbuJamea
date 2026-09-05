@@ -137,6 +137,95 @@ Implementation has NOT started. The repository is now prepared for the Implement
 
 ---
 
+# الجولة الرابعة — Final Decision Lock (قفل القرارات النهائية)
+
+> جولة القفل: حُسمت جميع القرارات المفتوحة الثمانية بالقرارات المحددة، وطبّقت تغييرات الـschema الدنيا المطلوبة فعلًا. لا تنفيذ.
+
+## القرارات المقفلة
+
+| # | القرار | الحل المطبَّق |
+|---|---|---|
+| 1 | فرض تغيير كلمة المرور بعد إعادة تعيين GM | عمود صريح **`users.must_change_password`** (`boolean NOT NULL DEFAULT false`) + توثيق الغرض/دورة الحياة/نقطة الإنفاذ (بوابة ما بعد المصادقة)/الـaudit |
+| 2 | تمييز نوع طلب التسجيل | عمود صريح **`registration_requests.request_type`** (enum `new_family`/`independent_family`، افتراضي `new_family`) + فهرس `registration_requests_type_status_idx` — **موثّر**، لا discriminator في JSON |
+| 3 | قناة طلب الأسرة المستقلة | حصريًا عبر **حساب الفرد المصادَق** (تسجيل دخول → طلب → كشف الانتساب → تحذير حرفي → تأكيد صريح → طلب فقط → موافقة فرع) — يُمنع على غير المصادقين. تطلّب إضافة **`account_type.family_member` + `role_code.family_member`** (النموذج السابق لا يمثّل حساب فرد) |
+| 4 | تكرار الهاتف في الاستيراد | **مسموح** — لا فريد على phone/secondary_phone؛ المشوّه خطأ؛ الهاتف ليس هوية (الحساب يُحدَّد بـnational_id ثم هاتف شخصه) |
+| 5 | صيغة الاسم | **أربعة حقول أساسية**: `first_name`/`father_name`/`grandfather_name`/`family_name` (الأول والأخير NOT NULL) — لا عمود `full_name` مخزّن؛ اسم العرض يُبنى بالدمج بمسافة واحدة مع تخطي الفارغ |
+| 6 | مشاركات الأرشيف العامة | تأكيد القائمة JPG/JPEG/PNG ≤ 5MB؛ صورة + نص فقط؛ بلا هوية مرسل/إشعارات/تتبع؛ تخزين حجري قبل النشر (جدول `archive_image_submissions` دون تغيير) |
+| 7 | تسليم إعادة تعيين GM | **كلمة مرور مؤقتة**: توليد قوي عشوائي، تخزين hash فقط، عرضها للـGM **مرة واحدة**، تسليم offline/رسمي على مسؤوليته، يُمنع الإرسال التلقائي (SMS/WhatsApp/بريد) إلا باعتماد مستقبلي، `must_change_password=true`، audit كامل |
+| (9) | الدعم الفني | يبقى **خارج نطاق هذا القفل**: فقدان الهاتف → الدعم الفني فقط (ليس Branch Admin جهة الاستعادة) — إجراءات تحقق هوية منفصلة تُوثَّق لاحقًا |
+
+## Schema Changes (هذه الجولة — الحد الأدنى المطلوب فعلًا)
+
+**إضافات فقط؛ لم يُضعَّف أو يُعدَّل أي قيد قائم (فريد/CHECK/فهرس) عدا توسيع CHECK الحسابات ليشمل النوع الجديد:**
+
+1. `users.must_change_password` (`boolean NOT NULL DEFAULT false`) — القرار #1.
+2. `registration_requests.request_type` (enum جديد `registration_request_type`: `new_family`/`independent_family`، افتراضي `new_family`) + `registration_requests_type_status_idx` — القرار #2.
+3. `account_type` enum += `family_member`؛ `role_code` enum += `family_member`؛ `users_account_type_auth_method_chk` أصبح `WHEN account_type IN ('family_head','family_member') THEN national_id + person_id` — القرار #3 (بدونها لا يمكن لفرد أسرة تسجيل الدخول لتقديم الطلب أصلًا).
+4. `people`: أُزيل `full_name` وأُضيف `first_name`/`father_name`/`grandfather_name`/`family_name` (الأول والأخير NOT NULL؛ الأوسطان nullable وتُتخطى في بناء اسم العرض) — القرار #5. (لا مراجع أخرى لـfull_name في الكود — بيانات ما قبل التنفيذ.)
+
+## Final Pre-Implementation Checklist
+
+- [x] Independent family request supported (`request_type='independent_family'`)
+- [x] Existing member can request independence after marriage (عبر حسابه المصادَق)
+- [x] Mandatory warning + explicit confirmation (النص الحرفي المقفل + تأكيد صريح)
+- [x] requestType explicitly identifies independent_family (عمود enum موثّر + فهرس)
+- [x] Transfer occurs only after approval (التقديم ينشئ الطلب فقط)
+- [x] Transfer is atomic (BEGIN…10 خطوات…COMMIT / ROLLBACK كامل)
+- [x] Person remains in people (لا يُحذف أبدًا)
+- [x] Family Head cannot own multiple families (`family_profiles_head_person_uidx` + تحقق)
+- [x] Existing family affiliation prevents duplicate membership (`family_members_person_uidx` + Head XOR Member)
+- [x] Password recovery starts with National ID (خطوة 1)
+- [x] Phone confirmation required (خطوة 3 — إدخال الهاتف كاملًا)
+- [x] Last two phone digits shown as hint ("ينتهي بـ 67" — آخر رقمين فقط)
+- [x] OTP verification required (خطوة 4 — تصميم التحدي الحالي دون إضعاف)
+- [x] Lost phone → Technical Support (ليس Branch Admin — موثق في التدفق والمصفوفة)
+- [x] GM can reset passwords (حصريًا — RBAC matrix)
+- [x] mustChangePassword enforced after GM reset (عمود + بوابة ما بعد المصادقة)
+- [x] Temporary password stored only as hash (يُعرض للـGM مرة واحدة، لا يُخزَّن نصًا)
+- [x] Static family introduction in Archive (static content — ليست post/ليست DB/لا جدول)
+- [x] Anonymous image + caption submission (صورة + نص فقط)
+- [x] No sender identity collection (لا أعمدة هوية في `archive_image_submissions` — منع صريح من إضافتها)
+- [x] No sender notifications (لا استلام/قبول/رفض/تتبع)
+- [x] Publisher review/preview/edit/publish/reject (دورة كاملة في المصفوفة)
+- [x] 5MB JPG/JPEG/PNG whitelist (CHECKs حجم/extension/MIME)
+- [x] Private pending storage (حجري — لا وصول عام للمعلّقة)
+- [x] Excel import rules documented (أوراق Families/Members/Reference + محظورات + تحققات + تقرير أخطاء بمرحلتين)
+- [x] Shared phone numbers allowed (قرار #4 — لا فريد؛ المشوّه خطأ فقط)
+- [x] National ID remains globally unique (`people_national_id_uidx` دون مساس)
+- [x] Name components are canonical (4 حقول؛ full_name ليس أساسيًا)
+- [x] RBAC finalized (مصفوفة 7 أدوار بما فيها Family Member، دون توسيع زائد)
+- [x] Audit requirements finalized (+ تعطيل/تفعيل حساب، + تصفير must_change_password؛ ممنوعات نص صريح/OTP)
+- [x] Security requirements documented (جدول نقاط الإنفاذ — مستوى توثيق)
+- [x] No unresolved architectural contradictions (فحص تقاطعي أدناه)
+
+## فحص التناقضات النهائي (Cross-document check)
+
+- **full_name:** لا يبقى أي مرجع في الكود (`grep` عبر src/ — نظيف)؛ الوثائق تصف النموذج الرباعي فقط.
+- **"عضو متزوج لا يمكنه أن يصبح Head مستقل":** لا وجود لهذه القاعدة في أي ملف — الموجود هو العكس (قاعدة الانتقال).
+- **فقدان الهاتف → Branch Admin:** لا يوجد؛ النفي الصريح موثق في التدفق + المصفوفة + الدعم الفني.
+- **مقدمة الأرشيف في DB:** لا — موصوفة static content في architecture-plan ولا جدول لها في database-schema/schema.ts.
+- **مشاركة الأرشيف تتطلب دخولًا/هوية/إشعارات:** لا — العكس موثق في كل المواضع.
+- **فريدية الهاتف:** لا يوجد أي قول بفريدية الهاتف — قرار الأرقام المشتركة موثق.
+- **GM يسترجع النص الصريح:** لا — "عرض النص الصريح مستحيل" + "reset/reissue وليست retrieval".
+- **قيود DB القائمة:** لم يُضعَّف شيء (فحص diff: إضافات فقط + توسيع CHECK الحسابات لقيمة جديدة ضمن نفس اللوحة السابقة).
+
+## Validation (الجولة الرابعة)
+
+- `tsc --noEmit`: نجاح بلا أخطاء.
+- `drizzle-kit generate`: نجاح — تحقق يدوي من: enum `registration_request_type`، `request_type` مع افتراضي `new_family` والفهرس المركب، `must_change_password boolean DEFAULT false NOT NULL`، enum `account_type`/`role_code` بقيمة `family_member`، أعمدة الاسم الأربعة في `people` بلا `full_name`، وCHECK الحسابات الموسّع.
+- بحث تناقضات مستودع-wide (البنود أعلاه): نظيف.
+
+## حدود التنفيذ (لم تتغير)
+
+لم يُنشأ أي: صفحة/مكوّن React/API route/server action/خدمة مصادقة/OTP service/خدمة رفع/لوحة/خدمة قاعدة بيانات/خدمة تسجيل/Job مجدول.
+
+## الخاتمة (القفل النهائي)
+
+**Implementation has NOT started.**
+**All remaining pre-implementation decisions have been locked.**
+
+---
+
 # الجولة الأولى — Historical Review (سياق تاريخي)
 
 ## Critical Issues Found (عولجت كلها)

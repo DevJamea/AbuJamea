@@ -144,7 +144,7 @@ role ∈ { branch_admin, publisher, admin, general_manager }
 
 شخص مسجل حاليًا كـ **Family Member** داخل أسرة أخرى، عند زواجه ورغبته في تأسيس أسرة مستقلة يمكنه تقديم **طلب** تسجيل أسرة مستقلة.
 
-**هذا طلب (Request) وليس نقلًا فوريًا** — يمر عبر موافقة الفرع (Branch approval) ضمن دورة الطلبات المعتمدة (`registration_requests` مع تمييز النوع في الـpayload — راجع Open Decisions).
+**هذا طلب (Request) وليس نقلًا فوريًا** — يمر عبر موافقة الفرع (Branch approval) ضمن دورة الطلبات المعتمدة، عبر عمود صريح **`registration_requests.request_type = 'independent_family'`** (وليس discriminator داخل الـpayload/JSON) — قرار مقفل، راجع `docs/09-architecture-review.md` (الجولة الرابعة).
 
 ### التحذير والتأكيد الإلزامي قبل التقديم
 
@@ -320,7 +320,7 @@ AND (expire_at IS NULL OR expire_at > NOW())
 - **تُوثَّق العملية في الـaudit إلزاميًا:** الفاعل (actor)، الحساب الهدف (target account)، الطابع الزمني، نوع العملية، النتيجة، والبيانات الوصفية ذات الصلة.
 - **يُمنع منعًا باتًّا** تخزين كلمات مرور بنص صريح في الـaudit logs — حتى المؤقتة.
 
-> ملاحظة تنفيذية: آلية "إلزام التغيير عند أول دخول" تحتاج حقل حالة (مثل `must_change_password`) — قرار معتم قبل بدء التنفيذ (راجع Open Decisions).
+> **قرار مقفل (ليس Open Decision):** آلية "إلزام التغيير عند أول دخول" تُفرض عبر العمود الصريح **`users.must_change_password`** (`boolean NOT NULL DEFAULT false`). يُضبط إلى `true` عند قيام General Manager بإعادة تعيين كلمة مرور مستخدم آخر وإصدار كلمة مرور مؤقتة. عند تسجيل الدخول بكلمة المرور المؤقتة يُفرض تغيير كلمة المرور إلزاميًا قبل اعتبار الحساب في حالة طبيعية (بوابة ما بعد المصادقة)؛ بعد نجاح التغيير يُصبح `must_change_password = false`. كلمة المرور المؤقتة لا تُخزَّن كنص صريح أبدًا — يُخزَّن hash فقط وفق آلية كلمات المرور المعتمدة (`password_hash`). راجع `docs/09-architecture-review.md` (الجولة الرابعة) للقرار المقفل الكامل.
 
 ---
 
@@ -422,7 +422,7 @@ AND (expire_at IS NULL OR expire_at > NOW())
 **لا يُسمح للملف بالتحكم المباشر إطلاقًا في:** معرفات قاعدة البيانات (IDs)، معرفات المستخدمين، معرفات الأدوار، الطوابع الزمنية، password hashes، أو معرفات الملكية الداخلية. هذه تُنشأ/تُدار بالنظام حصرًا.
 
 - `family_code` مفتاح ربط **داخلي في الـworkbook** بين Families وMembers — **ليس** معرف قاعدة بيانات ولا يُخزَّن كذلك.
-- أسماء الأعمدة الأربعة للاسم تُجمَّع في `people.full_name` (الدمج بمسافة واحدة بين الأجزاء غير الفارغة — راجع Open Decisions).
+- أسماء الأعمدة الأربعة للاسم هي مصدر الحقيقة: `first_name` و`father_name` و`grandfather_name` و`family_name`. لا يوجد `people.full_name` مخزّن؛ اسم العرض يُبنى في طبقة التطبيق بدمج الأجزاء غير الفارغة بمسافة واحدة.
 - ورقة Reference **غير ملزمة للنظام**: قيم الـenums والفروع في قاعدة البيانات/النظام هي المرجع النهائي — تُستخدم الورقة للمطابقة والتقارير فقط.
 
 ### التحقق قبل الالتزام (Validation قبل أي كتابة نهائية)
@@ -463,4 +463,4 @@ AND (expire_at IS NULL OR expire_at > NOW())
 
 **لم يبدأ بعد (مقصود):** UI / API / Auth / Registration / OTP service / Dashboard / CRUD / Notifications / File upload / Scheduled jobs / Importer.
 
-راجع "Open Decisions Before Implementation" في `docs/09-architecture-review.md` قبل بدء التنفيذ.
+راجع الجولة الرابعة — "Final Decision Lock" (القرارات المقفلة) في `docs/09-architecture-review.md` قبل بدء التنفيذ؛ القرارات المتعلقة بـ`registration_requests.request_type` و`users.must_change_password` مقفلة ونهائية.

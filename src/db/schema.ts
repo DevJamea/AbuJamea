@@ -20,13 +20,14 @@ import {
 export const roleCodeEnum = pgEnum("role_code", [
   "guest",
   "family_head",
+  "family_member",
   "branch_admin",
   "publisher",
   "admin",
   "general_manager",
 ]);
 
-export const accountTypeEnum = pgEnum("account_type", ["family_head", "administrative"]);
+export const accountTypeEnum = pgEnum("account_type", ["family_head", "family_member", "administrative"]);
 
 export const authMethodEnum = pgEnum("auth_method", ["national_id", "username"]);
 
@@ -40,6 +41,11 @@ export const healthConditionEnum = pgEnum("health_condition", [
   "diabetes",
   "hypertension",
   "other",
+]);
+
+export const registrationRequestTypeEnum = pgEnum("registration_request_type", [
+  "new_family",
+  "independent_family",
 ]);
 
 export const registrationRequestStatusEnum = pgEnum("registration_request_status", [
@@ -150,7 +156,10 @@ export const people = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     nationalId: varchar("national_id", { length: 20 }).notNull(),
-    fullName: varchar("full_name", { length: 220 }).notNull(),
+    firstName: varchar("first_name", { length: 120 }).notNull(),
+    fatherName: varchar("father_name", { length: 120 }),
+    grandfatherName: varchar("grandfather_name", { length: 120 }),
+    familyName: varchar("family_name", { length: 120 }).notNull(),
     gender: genderEnum("gender").notNull(),
     birthDate: date("birth_date").notNull(),
     phone: varchar("phone", { length: 10 }),
@@ -221,6 +230,7 @@ export const users = pgTable(
     authMethod: authMethodEnum("auth_method").notNull(),
     username: varchar("username", { length: 80 }),
     passwordHash: text("password_hash").notNull(),
+    mustChangePassword: boolean("must_change_password").notNull().default(false),
     branchId: integer("branch_id").references(() => branches.id, { onDelete: "restrict" }),
     isDisabled: boolean("is_disabled").notNull().default(false),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
@@ -236,7 +246,7 @@ export const users = pgTable(
       "users_account_type_auth_method_chk",
       sql`
         CASE
-          WHEN ${table.accountType} = 'family_head'
+          WHEN ${table.accountType} IN ('family_head', 'family_member')
           THEN ${table.authMethod} = 'national_id' AND ${table.personId} IS NOT NULL
           WHEN ${table.accountType} = 'administrative'
           THEN ${table.authMethod} = 'username' AND ${table.username} IS NOT NULL
@@ -364,6 +374,7 @@ export const registrationRequests = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     trackingCode: varchar("tracking_code", { length: 30 }).notNull(),
+    requestType: registrationRequestTypeEnum("request_type").notNull().default("new_family"),
     branchId: integer("branch_id")
       .notNull()
       .references(() => branches.id, { onDelete: "restrict" }),
@@ -381,6 +392,7 @@ export const registrationRequests = pgTable(
   (table) => [
     uniqueIndex("registration_requests_tracking_uidx").on(table.trackingCode),
     index("registration_requests_status_idx").on(table.status),
+    index("registration_requests_type_status_idx").on(table.requestType, table.status),
     index("registration_requests_branch_idx").on(table.branchId),
     index("registration_requests_head_nid_idx").on(table.headNationalId),
     index("registration_requests_created_idx").on(table.createdAt),
