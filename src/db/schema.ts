@@ -377,9 +377,28 @@ export const familyMembers = pgTable(
  * recorded-by foreign key and timestamps preserve auditability without putting
  * sensitive family or role data into this table.
  *
- * The direct FK guarantees the person's identity, while checking that the
- * person currently belongs to a family as a head or member is cross-table
- * validation owned by the future service (and must remain branch-scoped).
+ * DOMAIN INVARIANT (service-enforced, NOT a DB constraint):
+ * A war-wounded record may only target a person who currently belongs to a
+ * family. Before every INSERT/UPDATE the service MUST assert, inside the same
+ * transaction (lock the people row with SELECT ... FOR UPDATE):
+ *
+ *   EXISTS (SELECT 1 FROM family_profiles WHERE head_person_id = person_id)
+ *   OR
+ *   EXISTS (SELECT 1 FROM family_members  WHERE person_id      = person_id)
+ *
+ * Exactly one of the two holds, because of the Head XOR Member invariant.
+ * There is no third option: a person that exists in `people` but is not
+ * currently attached to any family is NOT a valid target.
+ *
+ * The check is also BRANCH-SCOPED: the family found above resolves the branch
+ * (`family_profiles.branch_id`, directly for a head or via
+ * `family_members.family_profile_id` for a member), and the acting admin must
+ * be authorized on that branch. A Branch Admin can never create or modify an
+ * injury record for a person belonging to another branch; General
+ * Manager/Admin act according to the final RBAC.
+ *
+ * The direct FK only guarantees the person's identity; the family/branch
+ * eligibility above is cross-table validation owned by the future service.
  */
 export const warWoundedRecords = pgTable(
   "war_wounded_records",

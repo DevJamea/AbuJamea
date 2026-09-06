@@ -161,6 +161,21 @@ role ∈ { branch_admin, publisher, admin, general_manager }
 - FK `person_id` مع `ON DELETE RESTRICT` يحافظ على سلامة المرجع وقابلية التتبع: حذف أو تغيير علاقة الأسرة لا يحذف صف `people` ولا يحذف سجل الإصابة. نطاق الفرع يُفرض في الخدمة عبر العلاقة الأسرية الحالية، مع بقاء بيانات الإصابة الحساسة خلف التفويض والتدقيق.
 - `family_profiles.has_war_wounded` تبقى علامة موجودة على مستوى الأسرة، وليست هوية الشخص المصاب ولا بديلًا عن سجل `war_wounded_records`.
 
+#### Domain Invariant (Service-level, cross-table)
+
+`war_wounded_records.person_id` يثبت **هوية الشخص فقط**. أهلية الشخص كهدف لسجل الإصابة تتطلب أن يكون مرتبطًا حاليًا بأسرة:
+
+```sql
+EXISTS (SELECT 1 FROM family_profiles WHERE head_person_id = person_id)
+OR
+EXISTS (SELECT 1 FROM family_members  WHERE person_id      = person_id)
+```
+
+- أحدهما فقط يتحقق بسبب Head XOR Member؛ لا يوجد خيار ثالث. لا يجوز إنشاء سجل إصابة لشخص موجود في `people` لكنه غير مرتبط بأسرة.
+- التحقق cross-table → لا يمكن فرضه بـ CHECK؛ تفرضه طبقة الخدمة قبل كل `INSERT`/`UPDATE` داخل معاملة واحدة مع قفل صف `people`.
+- التحقق **branch-scoped**: الفرع يُشتق من أسرة الشخص، ويجب أن يكون المستخدم الإداري مخولًا على ذلك الفرع؛ Branch Admin لا يسجل/يعدل سجل إصابة لشخص من فرع آخر، وGeneral Manager/Admin وفق RBAC النهائي.
+- لا يُضاف `branch_id` ولا `family_member_id` ولا `role`/`relation` إلى سجل الإصابة.
+
 ---
 
 ## قاعدة عمل: انتقال فرد أسرة إلى أسرة مستقلة (Member → Independent Family Head)

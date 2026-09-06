@@ -82,6 +82,22 @@ CONSTRAINT people_secondary_phone_format_chk CHECK (secondary_phone IS NULL OR s
 - `recorded_by_user_id` و`created_at` يحافظان على قابلية التتبع، بينما تبقى `notes` بيانات حساسة خلف نفس ضوابط التفويض والتدقيق الخاصة بالبيانات الصحية.
 - `family_profiles.has_war_wounded` تبقى علامة على مستوى الأسرة فقط؛ لا تحدد الشخص ولا تُستخدم كبديل عن سجل الشخص. يمكن أن تكون الإصابة للـHead أو لأي Member.
 
+#### Domain Invariant — أهلية الشخص كهدف لسجل الإصابة (Service-level)
+
+`war_wounded_records.person_id` **يثبت هوية الشخص فقط**. أما أهليته كهدف لسجل إصابة فتتطلب أن يكون الشخص **مرتبطًا حاليًا بأسرة**:
+
+```sql
+EXISTS (SELECT 1 FROM family_profiles WHERE head_person_id = person_id)
+OR
+EXISTS (SELECT 1 FROM family_members  WHERE person_id      = person_id)
+```
+
+- **يجب أن يتحقق أحدهما فقط** بسبب قاعدة Head XOR Member — لا يوجد خيار ثالث.
+- شخص موجود في `people` لكنه غير مرتبط حاليًا بأي أسرة **ليس هدفًا صالحًا**؛ يُرفض الإنشاء.
+- هذا تحقق **cross-table** فلا يمكن فرضه بـ CHECK في PostgreSQL؛ تفرضه **طبقة الخدمة** قبل كل `INSERT`/`UPDATE`، داخل نفس المعاملة ومع قفل صف `people` (`SELECT ... FOR UPDATE`) لمنع السباقات مع تغييرات العضوية.
+- **Branch-scoped:** الأسرة الناتجة أعلاه تحدد الفرع (`family_profiles.branch_id` مباشرة للـHead، أو عبر `family_members.family_profile_id` للـMember)، ويجب أن يكون المستخدم الإداري مخولًا على ذلك الفرع. **Branch Admin لا يجوز له** تسجيل أو تعديل سجل إصابة لشخص من فرع آخر؛ General Manager/Admin وفق RBAC النهائي.
+- لا يُضاف `branch_id` ولا `family_member_id` ولا `role`/`relation` إلى `war_wounded_records`؛ لا تُكرَّر معلومات العلاقة داخل الجدول.
+
 ### قاعدة 4 زوجات
 
 ```sql
@@ -329,6 +345,8 @@ pending → rejected    (لا يُنشر شيء؛ الملف الحجري يُن
 | لا ازدواج تمثيل شخص (مركزية `people`) | ✅ FKs + `family_members_person_uidx` | — |
 | هوية سجل الإصابة (Person-centric) | ✅ `war_wounded_records.person_id → people.id` + `war_wounded_person_uidx` | — |
 | تحديد Head/Member للمصاب | ❌ العلاقة الحالية عبر جدولين | ✅ الاستعلام/التحقق عبر `family_profiles.head_person_id` أو `family_members.person_id` |
+| أهلية الشخص كهدف لسجل إصابة (مرتبط بأسرة) | ❌ cross-table | ✅ `EXISTS(head_person_id)` OR `EXISTS(family_members.person_id)` قبل INSERT/UPDATE |
+| نطاق الفرع لسجل الإصابة | ❌ لا `branch_id` في الجدول | ✅ الفرع من أسرة الشخص + تفويض الفرع (RBAC) |
 | Head XOR Member (لا صف member للـhead) | ❌ عبر الجداول | ✅ معاملة + قفل صف `people` |
 | هاتف nullable لغير الـhead | ✅ | — |
 | هاتف الـHead الأساسي مطلوب | ❌ (شرط الـhead في جدول آخر) | ✅ Registration/Service validation |

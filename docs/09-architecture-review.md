@@ -27,6 +27,24 @@
 - تبقى `family_profiles.has_war_wounded` علامة على مستوى الأسرة فقط؛ لا تحدد الشخص ولا تستبدل السجل الشخصي.
 - لا يضاف `branch_id` أو أي نسخة من علاقة الأسرة إلى سجل الإصابة؛ عزل الفروع يستمر عبر التحقق server-side من الأسرة/الفرع المرتبط بالشخص حاليًا.
 
+## Domain Invariant النهائي — أهلية الشخص كهدف لسجل الإصابة
+
+`war_wounded_records.person_id` يثبت **هوية الشخص فقط**، ولا يثبت أهليته. الشخص المستهدف يجب أن يكون بالضبط أحد التالي:
+
+- **A) Family Head:** `family_profiles.head_person_id = war_wounded_records.person_id`
+- **B) Family Member:** `family_members.person_id = war_wounded_records.person_id`
+
+```sql
+EXISTS (SELECT 1 FROM family_profiles WHERE head_person_id = person_id)
+OR
+EXISTS (SELECT 1 FROM family_members  WHERE person_id      = person_id)
+```
+
+- **أحدهما فقط** بسبب Head XOR Member — لا يوجد خيار ثالث؛ شخص غير مرتبط حاليًا بأي أسرة **ليس هدفًا صالحًا**.
+- التحقق **Service/Domain-level** لأنه cross-table (غير قابل للتعبير كـ CHECK في PostgreSQL)، ويجري قبل كل `INSERT`/`UPDATE` داخل نفس المعاملة مع قفل صف `people`.
+- التحقق **branch-scoped**: الفرع يُشتق من الأسرة (`family_profiles.branch_id` للـHead، أو عبر `family_members.family_profile_id` للـMember)، ويجب أن يكون المستخدم الإداري مخولًا عليه. Branch Admin لا يجوز له تسجيل/تعديل سجل إصابة لشخص من فرع آخر؛ General Manager/Admin وفق RBAC النهائي.
+- **لا يُضاف** `branch_id` ولا `family_member_id` ولا `role` ولا `relation` إلى `war_wounded_records`، ولا تُكرَّر معلومات العلاقة داخله. لا migration في هذه الجولة.
+
 ## العلاقات والفهارس والقيود المتأثرة
 
 | العنصر | التصميم السابق | التصميم النهائي |
