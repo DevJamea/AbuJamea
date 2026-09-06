@@ -1,6 +1,6 @@
 # منصة عائلة أبو جامع — Corrected Architecture Plan
 
-> **المراجعة النهائية قبل التنفيذ (Final Pre-Implementation)** — هذا الإصدار يتضمن كل تصحيحات الـSchema والمعمارية النهائية. التفاصيل الكاملة للقيود في `docs/database-schema.md`.
+> **التصحيح النهائي قبل التنفيذ (Final Pre-Implementation Schema Correction)** — هذا الإصدار يتضمن تصحيح نموذج المصابين إلى Person-centric، مع كل تصحيحات الـSchema والمعمارية النهائية. التفاصيل الكاملة للقيود في `docs/database-schema.md`.
 
 ## قرار الـStack
 بعد المراجعة، تم اعتماد الاستمرار على:
@@ -33,8 +33,9 @@
 - `users.person_id`
 - `family_members.person_id`
 - `family_profiles.head_person_id`
+- `war_wounded_records.person_id`
 
-بهذا لا يمكن تمثيل الشخص نفسه كسجلين منفصلين داخل النظام.
+بهذا لا يمكن تمثيل الشخص نفسه كسجلين منفصلين داخل النظام، وسجل الإصابة يستخدم هوية الشخص المركزية نفسها.
 
 ### سياسة الهاتف (نهائية)
 - `people.phone` (الأساسي) **nullable** على مستوى البيانات — ليس كل فرد أسرة يملك هاتفًا.
@@ -147,6 +148,18 @@ role ∈ { branch_admin, publisher, admin, general_manager }
 هذا يمنع إدخال الزوجة الخامسة على مستوى DB (تحتاج رقمًا خامسًا أو رقمًا مشغولًا — كلاهما مرفوض).
 
 **استراتيجية الـrace condition (ملزمة للتنفيذ):** التخصيص التلقائي لـ`wife_ordinal` داخل Transaction مع قفل صف `family_profiles` (`FOR UPDATE`)، مع قراءة الأرقام المشغولة واختيار رقم حر (يسمح بإعادة استخدام رقم متحرر)، والـunique index يعمل كـbackstop — أي سباق ينهار إلى 23505 فتعيد الخدمة المحاولة.
+
+### نموذج المصابين — Person-centric
+
+> **War-wounded records are person-centric and may reference either the family head or a family member through people.id.**
+
+- `war_wounded_records.person_id` يرتبط مباشرة بـ`people.id`، وهو نفس سجل الهوية الموجود أصلًا؛ لا يُنشأ Person جديد للمصاب.
+- إذا كان الشخص Family Head، تُعرَف العلاقة عبر `family_profiles.head_person_id`.
+- إذا كان الشخص Family Member، تُعرَف العلاقة عبر `family_members.person_id`.
+- لا يتم تخزين `family_member_id` أو `role`/`relation` مكررة في سجل الإصابة؛ Head لا يحتاج إلى صف مصطنع في `family_members`.
+- `war_wounded_person_uidx` يمنع أكثر من سجل إصابة حالي للشخص نفسه؛ الجدول لا يضيف تاريخًا/حالة دورة حياة جديدة، بل يحافظ على دلالة السجل الحالي القائمة.
+- FK `person_id` مع `ON DELETE RESTRICT` يحافظ على سلامة المرجع وقابلية التتبع: حذف أو تغيير علاقة الأسرة لا يحذف صف `people` ولا يحذف سجل الإصابة. نطاق الفرع يُفرض في الخدمة عبر العلاقة الأسرية الحالية، مع بقاء بيانات الإصابة الحساسة خلف التفويض والتدقيق.
+- `family_profiles.has_war_wounded` تبقى علامة موجودة على مستوى الأسرة، وليست هوية الشخص المصاب ولا بديلًا عن سجل `war_wounded_records`.
 
 ---
 
@@ -502,4 +515,4 @@ AND (expire_at IS NULL OR expire_at > NOW())
 
 **لم يبدأ بعد (مقصود):** UI / API / Auth / Registration / OTP service / Dashboard / CRUD / Notifications / File upload / Scheduled jobs / Importer.
 
-راجع الجولة الرابعة — "Final Decision Lock" (القرارات المقفلة) في `docs/09-architecture-review.md` قبل بدء التنفيذ؛ القرارات المتعلقة بـ`registration_requests.request_type` و`users.must_change_password` مقفلة ونهائية.
+راجع الجولة الخامسة — "Final Schema Correction: War-Wounded Person Model" والجولة الرابعة — "Final Decision Lock" في `docs/09-architecture-review.md` قبل بدء التنفيذ؛ قرار نموذج المصابين، والقرارات المتعلقة بـ`registration_requests.request_type` و`users.must_change_password` مقفلة ونهائية.
