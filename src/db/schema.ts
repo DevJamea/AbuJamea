@@ -358,18 +358,41 @@ export const familyMembers = pgTable(
   ],
 );
 
+/**
+ * Current war-wounded record — person-centric by design.
+ *
+ * `person_id` points directly to the canonical `people` row. The person's
+ * family role is deliberately derived from the existing family relationships:
+ *   - Family Head: `family_profiles.head_person_id`
+ *   - Family Member: `family_members.person_id`
+ *
+ * Do not add a family-member-specific foreign key or a copied role/relation
+ * here. A person can be a valid target whether the person is represented as
+ * a head or as a member,
+ * and changing that family relationship must not create a new person or delete
+ * the person's injury record.
+ *
+ * This table represents the current record (there is no lifecycle/status column),
+ * so the unique index permits at most one current record for each person. The
+ * recorded-by foreign key and timestamps preserve auditability without putting
+ * sensitive family or role data into this table.
+ *
+ * The direct FK guarantees the person's identity, while checking that the
+ * person currently belongs to a family as a head or member is cross-table
+ * validation owned by the future service (and must remain branch-scoped).
+ */
 export const warWoundedRecords = pgTable(
   "war_wounded_records",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    familyMemberId: uuid("family_member_id")
+    personId: uuid("person_id")
       .notNull()
-      .references(() => familyMembers.id, { onDelete: "restrict" }),
+      .references(() => people.id, { onDelete: "restrict" }),
     recordedByUserId: uuid("recorded_by_user_id").references(() => users.id, { onDelete: "set null" }),
     notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("war_wounded_member_uidx").on(table.familyMemberId)],
+  (table) => [uniqueIndex("war_wounded_person_uidx").on(table.personId)],
 );
 
 export const registrationRequests = pgTable(

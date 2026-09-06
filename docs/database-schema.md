@@ -3,7 +3,7 @@
 > المصدر الوحيد للحقيقة (Single Source of Truth) للـSchema هو `src/db/schema.ts`.
 > هذا الملف يوثّق القرارات، القيود، وحدود ما يُفرض على مستوى قاعدة البيانات مقابل ما يُفرض على مستوى الخدمة (Service Layer).
 
-**آخر تحديث:** المراجعة النهائية قبل التنفيذ (Final Pre-Implementation Corrections).
+**آخر تحديث:** التصحيح النهائي لنموذج المصابين (Final War-Wounded Person Model Correction) قبل التنفيذ.
 
 ---
 
@@ -26,6 +26,7 @@
 - `users.person_id`
 - `family_profiles.head_person_id`
 - `family_members.person_id`
+- `war_wounded_records.person_id`
 - `announcements.related_person_id`
 
 بهذا لا يمكن تمثيل الشخص نفسه بأكثر من سجل هوية.
@@ -70,10 +71,16 @@ CONSTRAINT people_secondary_phone_format_chk CHECK (secondary_phone IS NULL OR s
 
 ### سجلات الجرحى (`war_wounded_records`)
 
-- `war_wounded_records` مرتبط بـ `family_members` (عبر `family_member_id`) — يُسجَّل فيه أفراد الأسرة فقط (وليس رب الأسرة).
-- Family Head لا يمكنه الحصول على صف في `war_wounded_records` بسبب قاعدة Head XOR Member (الـHead ليس في `family_members`).
-- `family_profiles.has_war_wounded` هو علامة مستوى الأسرة التي تشير إلى وجود جرحى في الأسرة (يمكن أن يكون الـHead أو أحد الأعضاء).
-- إذا كان رب الأسرة هو الشخص الجريح، تُضبط `family_profiles.has_war_wounded = true` كعلامة أسرية، ولا يُنشأ سجل `war_wounded_record` منفصل للـHead (البنية لا تدعم ذلك ولا يوجد قرار معماري يطلب ذلك).
+> **War-wounded records are person-centric and may reference either the family head or a family member through people.id.**
+
+- `war_wounded_records.person_id` هو FK مباشر إلى `people.id` — ولا يوجد `family_member_id` في هذا الجدول.
+- Family Head يُمثَّل في سجل الإصابة نفسه عندما يساوي `person_id` قيمة `family_profiles.head_person_id`.
+- Family Member يُمثَّل في سجل الإصابة نفسه عندما يساوي `person_id` قيمة `family_members.person_id`.
+- لا يُخزَّن `role` أو `relation` داخل `war_wounded_records`؛ تُستنتج الصفة من علاقات الأسرة الحالية. لا يحتاج الـHead إلى صف إضافي في `family_members`.
+- `war_wounded_person_uidx` فهرس فريد على `person_id`، لأن النموذج الحالي يمثل سجل الإصابة الحالي ويمنع أكثر من سجل فعال للشخص نفسه.
+- `person_id` يستخدم `ON DELETE RESTRICT`: لا يمكن حذف سجل `people` بينما يوجد سجل إصابة مرتبط به، وتغيير/حذف علاقة الأسرة لا يحذف هوية الشخص أو سجل الإصابة. يبقى نطاق الفرع مقيّدًا في طبقة الخدمة عبر الأسرة التي ينتمي إليها الشخص حاليًا، وليس عبر نسخة `branch_id` أو علاقة عائلية زائدة في سجل الإصابة.
+- `recorded_by_user_id` و`created_at` يحافظان على قابلية التتبع، بينما تبقى `notes` بيانات حساسة خلف نفس ضوابط التفويض والتدقيق الخاصة بالبيانات الصحية.
+- `family_profiles.has_war_wounded` تبقى علامة على مستوى الأسرة فقط؛ لا تحدد الشخص ولا تُستخدم كبديل عن سجل الشخص. يمكن أن تكون الإصابة للـHead أو لأي Member.
 
 ### قاعدة 4 زوجات
 
@@ -320,6 +327,8 @@ pending → rejected    (لا يُنشر شيء؛ الملف الحجري يُن
 |---|:--:|:--:|
 | Global National ID uniqueness | ✅ `people_national_id_uidx` | — |
 | لا ازدواج تمثيل شخص (مركزية `people`) | ✅ FKs + `family_members_person_uidx` | — |
+| هوية سجل الإصابة (Person-centric) | ✅ `war_wounded_records.person_id → people.id` + `war_wounded_person_uidx` | — |
+| تحديد Head/Member للمصاب | ❌ العلاقة الحالية عبر جدولين | ✅ الاستعلام/التحقق عبر `family_profiles.head_person_id` أو `family_members.person_id` |
 | Head XOR Member (لا صف member للـhead) | ❌ عبر الجداول | ✅ معاملة + قفل صف `people` |
 | هاتف nullable لغير الـhead | ✅ | — |
 | هاتف الـHead الأساسي مطلوب | ❌ (شرط الـhead في جدول آخر) | ✅ Registration/Service validation |
@@ -386,6 +395,17 @@ ALTER TABLE users ADD CONSTRAINT users_account_type_auth_method_chk CHECK (
   END
 );
 ```
+
+### تصحيح نموذج الجرحى — ملاحظة ترحيل مستقبلية (غير منفذة)
+
+هذا التصحيح لم ينشئ migration فعلية. إذا كانت هناك قاعدة قديمة تحتوي على `war_wounded_records.family_member_id`، فسيحتاج ترحيل مستقبلي، داخل نافذة صيانة ومع backup، إلى:
+
+1. إضافة `person_id` مؤقتًا/جديدًا وملؤه من `family_members.person_id` عبر `family_member_id`.
+2. فحص التكرارات قبل إنشاء `war_wounded_person_uidx`.
+3. إنشاء FK `person_id → people.id` مع `ON DELETE RESTRICT`، ثم إزالة FK/العمود/الفهرس القديم فقط بعد نجاح التحقق.
+4. مراجعة أي علامة `family_profiles.has_war_wounded` تخص Head يدويًا؛ العلامة القديمة لا تحمل هوية الشخص، ولا يجوز اختراع سجل Head أو Person من دون بيانات مصدر.
+
+هذه الخطوات توثيق للتأثير المحتمل فقط، وليست migration ولا تُنفذ في هذه المهمة.
 
 **تحذير ترحيل OTP:** الخطوة 2 تحذف سجلات تحدٍ قديمة مكررة (المستهلكة تاريخيًا) — لا قيمة دائمة لها (لا يوجد متطلب تاريخ OTP)، لكن إن وُجدت قاعدة انتهازية للتدقيق، صدّرها إلى `audit_logs` أو نسخة احتياطية قبل الحذف. أي عملية ترحيل تُنفذ داخل نافذة صيانة مع backup مجرّب.
 

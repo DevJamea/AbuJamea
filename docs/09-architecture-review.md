@@ -1,6 +1,63 @@
 # Architecture Review
 
-> هذا الملف يوثّق جولات المراجعة تراكميًا: الجولة الأولى (سياق تاريخي — كل بنودها عولجت)، الجولة الثانية (تصحيحات الـSchema النهائية)، ثم الجولة الثالثة (Final Pre-Implementation Requirements Verification — قواعد العمل النهائية) التي تُغلق مرحلة ما قبل التنفيذ. ما يتعارض بين الجولات تعتمد فيه الأحدث.
+> هذا الملف يوثّق جولات المراجعة تراكميًا: الجولة الأولى (سياق تاريخي — كل بنودها عولجت)، الجولة الثانية (تصحيحات الـSchema النهائية)، الجولة الثالثة (Final Pre-Implementation Requirements Verification — قواعد العمل النهائية)، الجولة الرابعة (Final Decision Lock)، ثم الجولة الخامسة (تصحيح نموذج المصابين النهائي). ما يتعارض بين الجولات تعتمد فيه الأحدث.
+
+---
+
+# الجولة الخامسة — Final Schema Correction: War-Wounded Person Model
+
+## القرار النهائي
+
+> **War-wounded records are person-centric and may reference either the family head or a family member through people.id.**
+
+يمكن أن يكون رب الأسرة مصابًا، ويمكن أيضًا أن يكون أي فرد من أفراد الأسرة مصابًا. لذلك فإن `war_wounded_records` يسجل هوية الشخص عبر `people.id` مباشرة، ولا يسجل نوع العلاقة داخل سجل الإصابة.
+
+## المشكلة التي صُححت
+
+كان `war_wounded_records` يعتمد على `family_member_id` فقط. وبما أن Family Head ممثل حصريًا عبر `family_profiles.head_person_id` وليس عبر `family_members`، لم يكن بالإمكان إنشاء سجل إصابة شخصي للـHead. كما أن استخدام علامة `family_profiles.has_war_wounded` كبديل لا يحفظ هوية الشخص المصاب ولا يكفي لقابلية التتبع.
+
+## التصميم الجديد
+
+- `war_wounded_records.person_id` هو FK مباشر، `NOT NULL`، إلى `people.id`.
+- Family Head يُحدَّد بعلاقة `family_profiles.head_person_id`، وFamily Member يُحدَّد بعلاقة `family_members.person_id`.
+- لا يوجد `family_member_id` في الجدول، ولا تُضاف نسخة `role`/`relation` redundant؛ هذه الصفة تُستنتج من العلاقات الحالية.
+- `war_wounded_person_uidx` يستبدل الفهرس القديم ويمنع أكثر من سجل إصابة حالي للشخص نفسه، لأن الجدول لا يحتوي على lifecycle/status لسجلات تاريخية.
+- `person_id` يستخدم `ON DELETE RESTRICT`؛ لا يؤدي تغيير علاقة الأسرة إلى حذف `people` أو سجل الإصابة، ولا يُنشأ Person جديد للمصاب.
+- يبقى `recorded_by_user_id` مع `ON DELETE SET NULL` و`created_at` كما هما لحفظ auditability. تبقى `notes` ضمن ضوابط حماية البيانات الحساسة.
+- تبقى `family_profiles.has_war_wounded` علامة على مستوى الأسرة فقط؛ لا تحدد الشخص ولا تستبدل السجل الشخصي.
+- لا يضاف `branch_id` أو أي نسخة من علاقة الأسرة إلى سجل الإصابة؛ عزل الفروع يستمر عبر التحقق server-side من الأسرة/الفرع المرتبط بالشخص حاليًا.
+
+## العلاقات والفهارس والقيود المتأثرة
+
+| العنصر | التصميم السابق | التصميم النهائي |
+|---|---|---|
+| هوية المصاب | `family_member_id → family_members.id` | `person_id → people.id` |
+| دعم الـHead | غير ممكن؛ الـHead ليس في `family_members` | ممكن عبر `family_profiles.head_person_id` |
+| دعم الـMember | ممكن عبر `family_member_id` | ممكن عبر `family_members.person_id` |
+| منع التكرار الحالي | `war_wounded_member_uidx` على `family_member_id` | `war_wounded_person_uidx` على `person_id` |
+| حذف الشخص | لا علاقة مباشرة بـ`people` | FK `ON DELETE RESTRICT` يحمي الهوية وسجل الإصابة |
+| تحديد الدور | ضمنيًا من كون المرجع `family_members` | مشتق من العلاقات الحالية، بلا عمود role/relation مكرر |
+
+لم تتغير علاقات الأسرة نفسها (`family_profiles.head_person_id` و`family_members.person_id`) أو قيود Head XOR Member، ولم تتغير RBAC أو قواعد الهاتف أو الزواج أو `marital_status` أو أي قرار مقفل آخر.
+
+## Files Changed (هذه الجولة)
+
+- `src/db/schema.ts` — تحويل FK والفهرس في `war_wounded_records` إلى `person_id → people.id` وإضافة التعليق المعماري.
+- `docs/database-schema.md` — تحديث نموذج الجرحى، العلاقات، الفهرس، الحذف، التدقيق، عزل الفروع، ومصفوفة الإنفاذ.
+- `docs/architecture-plan.md` — إضافة نموذج المصابين Person-centric ضمن نموذج الأسرة والهوية.
+- `docs/09-architecture-review.md` — توثيق هذا القرار النهائي ومقارنته بالتصميم السابق.
+
+## حدود التنفيذ
+
+هذه الجولة تعدّل الـSchema والتوثيق فقط. لا UI، ولا API، ولا Auth، ولا Registration flow، ولا Dashboard، ولا Feature implementation، ولا migration فعلية.
+
+## التحقق في هذه الجولة
+
+- `npm exec tsc -- --noEmit --pretty false`: ✅ نجح.
+- `npx drizzle-kit generate --schema ./src/db/schema.ts --dialect postgresql --out /tmp/abujamea-drizzle-generate --name war_wounded_person_model`: ✅ نجح. تمت مراجعة الناتج المؤقت؛ لم تُنشأ migration داخل المستودع.
+- الناتج يعرّف `war_wounded_records.person_id` كـ`uuid NOT NULL`، وFK `war_wounded_records_person_id_people_id_fk` إلى `people.id` مع `ON DELETE RESTRICT`، وFK التسجيل إلى `users` مع `ON DELETE SET NULL`، و`war_wounded_person_uidx` فقط على `person_id`. لا يوجد FK أو عمود `family_member_id` في الجدول المولّد.
+- `npm run lint`: ⚠️ متاح لكنه يفشل بخطأ سابق خارج هذه الجولة في `src/app/page.tsx:13:113` (`react/no-unescaped-entities`). فحص الملف المعدّل `src/db/schema.ts` منفردًا ينجح.
+- البحث النصي على مستوى المستودع راجع `war_wounded_records` و`family_member_id` و`has_war_wounded` ومصطلحات war wounded/المصابين/جرحى؛ لم يبقَ افتراض schema قديم في `src/db/schema.ts` أو أقسام التوثيق الحالية. ورود `family_member_id` المتبقي في التوثيق يصف التصميم السابق أو يؤكد عدم وجوده، وليس تعريفًا أو FK جديدًا.
 
 ---
 
